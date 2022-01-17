@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
-#include <wordexp.h>
 #include <string.h>
 #include <unistd.h>
 #include <err.h>
@@ -12,41 +11,95 @@ struct git_host_args {
 };
 
 static void
-git_host_parse(const char *command, int *countp, char ***argumentsp) {
-	char **arguments;
-	wordexp_t p;
+git_host_array_push(char *string, int *countp, char ***arrayp) {
+	char **array = *arrayp;
+	int count = *countp;
 
-	switch (wordexp(command, &p, WRDE_NOCMD | WRDE_UNDEF)) {
-	case 0:
-		break;
-	case WRDE_BADCHAR:
-		errx(EXIT_FAILURE, "wordexp '%s': Illegal occurrence of newline or one of |, &, ;, <, >, (, ), {, }.", command);
-	case WRDE_BADVAL:
-		errx(EXIT_FAILURE, "wordexp '%s': An undefined shell variable was referenced, and the WRDE_UNDEF flag told us to consider this an error.", command);
-	case WRDE_CMDSUB:
-		errx(EXIT_FAILURE, "wordexp '%s': Command substitution requested, but the WRDE_NOCMD flag told us to consider this an error.", command);
-	case WRDE_NOSPACE:
-		errx(EXIT_FAILURE, "wordexp '%s': Out of memory.", command);
-	case WRDE_SYNTAX:
-		errx(EXIT_FAILURE, "wordexp '%s': Shell syntax error, such as unbalanced parentheses or unmatched quotes.", command);
-	default:
-		errx(EXIT_FAILURE, "wordexp '%s': Unknown error.", command);
+	array = realloc(array, sizeof (*array) * ++count);
+	if (array == NULL) {
+		err(EXIT_FAILURE, "realloc");
+	}
+	array[count - 1] = string;
+
+	*countp = count;
+	*arrayp = array;
+}
+
+static void
+git_host_expand_command(const char *command, int *argcp, char ***argvp) {
+	enum {
+		EXPAND_SPACES,
+		EXPAND_LITERAL,
+		EXPAND_QUOTE_SINGLE,
+		EXPAND_QUOTE_DOUBLE,
+		EXPAND_QUOTE_DOUBLE_ESCAPE,
+		EXPAND_END,
+		EXPAND_ERROR_UNCLOSED_QUOTE,
+	} state = EXPAND_SPACES;
+	char copy[strlen(command) + 1];
+	char *it = memcpy(copy, command, sizeof (copy)); /* Local copy for in-place expansion */
+	char *dst, *src, *arg;
+
+	*argcp = 0;
+	*argvp = NULL;
+
+	while (state < EXPAND_END) {
+		switch (state) {
+		case EXPAND_SPACES:
+			switch (*it) {
+			case '\0': state = EXPAND_END; break;
+			case ' ':  break;
+			case '"':  state = EXPAND_QUOTE_DOUBLE; dst = src = arg = it; src++; break;
+			case '\'': state = EXPAND_QUOTE_SINGLE; dst = src = arg = it; src++; break;
+			default:   state = EXPAND_LITERAL; dst = src = arg = it; dst++; src++; break;
+			}
+			break;
+		case EXPAND_LITERAL:
+			switch (*it) {
+			case '\0': state = EXPAND_END; *dst = '\0'; git_host_array_push(strdup(arg), argcp, argvp); break;
+			case '"':  state = EXPAND_QUOTE_DOUBLE; src++; break;
+			case '\'': state = EXPAND_QUOTE_SINGLE; src++; break;
+			case ' ':  state = EXPAND_SPACES; *dst = '\0'; git_host_array_push(strdup(arg), argcp, argvp); break;
+			default:   *dst++ = *src++; break;
+			}
+			break;
+		case EXPAND_QUOTE_SINGLE:
+			switch (*it) {
+			case '\0': state = EXPAND_ERROR_UNCLOSED_QUOTE; break;
+			case '\'': state = EXPAND_LITERAL; src++; break;
+			default:   *dst++ = *src++; break;
+			}
+			break;
+		case EXPAND_QUOTE_DOUBLE:
+			switch (*it) {
+			case '\0': state = EXPAND_ERROR_UNCLOSED_QUOTE; break;
+			case '"':  state = EXPAND_LITERAL; src++; break;
+			case '\\': state = EXPAND_QUOTE_DOUBLE_ESCAPE; src++; break;
+			default:   *dst++ = *src++; break;
+			}
+			break;
+		case EXPAND_QUOTE_DOUBLE_ESCAPE:
+			switch (*it) {
+			case '\0': state = EXPAND_ERROR_UNCLOSED_QUOTE; break;
+			default:   state = EXPAND_QUOTE_DOUBLE; *dst++ = *src++; break;
+			}
+			break;
+		default:
+			abort();
+		}
+		it++;
 	}
 
-	if (p.we_wordc == 0) {
-		errx(EXIT_FAILURE, "Nothing expanded in command '%s'", command);
+	if (state == EXPAND_ERROR_UNCLOSED_QUOTE) {
+		errx(EXIT_FAILURE, "Invalid command: Unclosed quote");
 	}
 
-	arguments = malloc((p.we_wordc + 1) * sizeof (*arguments));
-	for (unsigned int i = 0; i < p.we_wordc; i++) {
-		arguments[i] = strdup(p.we_wordv[i]);
+	if (*argcp == 0) {
+		errx(EXIT_FAILURE, "Invalid command: empty command");
 	}
-	arguments[p.we_wordc] = NULL;
 
-	wordfree(&p);
-
-	*countp = p.we_wordc;
-	*argumentsp = arguments;
+	git_host_array_push(NULL, argcp, argvp);
+	--*argcp;
 }
 
 static inline int
@@ -186,6 +239,6 @@ main(int argc, char *argv[]) {
 	char **arguments;
 	int count;
 
-	git_host_parse(args.command, &count, &arguments);
+	git_host_expand_command(args.command, &count, &arguments);
 	git_host_exec(count, arguments);
 }
