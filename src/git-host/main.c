@@ -4,11 +4,33 @@
 #include <stdnoreturn.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <errno.h>
 #include <err.h>
+
+#include "config.h"
 
 struct git_host_args {
 	const char *command;
 };
+
+enum git_host_mode {
+	GIT_HOST_MODE_NA,
+	GIT_HOST_MODE_RO,
+	GIT_HOST_MODE_WR,
+	GIT_HOST_MODE_RW,
+};
+
+static char *
+xstrdup(const char *s) {
+	char * const c = strdup(s);
+
+	if (c == NULL) {
+		err(EXIT_FAILURE, "strdup %s", c);
+	}
+
+	return c;
+}
 
 static void
 git_host_array_push(char *string, int *countp, char ***arrayp) {
@@ -56,10 +78,10 @@ git_host_expand_command(const char *command, int *argcp, char ***argvp) {
 			break;
 		case EXPAND_LITERAL:
 			switch (*it) {
-			case '\0': state = EXPAND_END; *dst = '\0'; git_host_array_push(strdup(arg), argcp, argvp); break;
+			case '\0': state = EXPAND_END; *dst = '\0'; git_host_array_push(xstrdup(arg), argcp, argvp); break;
 			case '"':  state = EXPAND_QUOTE_DOUBLE; src++; break;
 			case '\'': state = EXPAND_QUOTE_SINGLE; src++; break;
-			case ' ':  state = EXPAND_SPACES; *dst = '\0'; git_host_array_push(strdup(arg), argcp, argvp); break;
+			case ' ':  state = EXPAND_SPACES; *dst = '\0'; git_host_array_push(xstrdup(arg), argcp, argvp); break;
 			default:   *dst++ = *src++; break;
 			}
 			break;
@@ -102,81 +124,265 @@ git_host_expand_command(const char *command, int *argcp, char ***argvp) {
 	--*argcp;
 }
 
-static inline int
-git_host_check_path(const char *path) {
+static char *
+git_host_pathcat(const char *dir, const char *sub) {
+	const size_t dirlen = strlen(dir), sublen = strlen(sub);
+	char path[dirlen + sublen + 2];
 
-	while (*path != '\0' && (*path != '/' || *++path != '.')) {
-		path++;
-	}
+	memcpy(path, dir, dirlen);
+	path[dirlen] = '/';
+	memcpy(path + dirlen + 1, sub, sublen + 1);
 
-	return *path != '\0';
+	return xstrdup(path);
 }
 
 static char *
-git_host_repository(const char *repository) {
-	const char * const user = getenv("SSH_AUTHORIZED_BY");
+git_host_execpath(const char *file) {
+	const char *execpath = getenv("GIT_EXEC_PATH");
 
-	if (user == NULL || *user == '\0') {
-		errx(EXIT_FAILURE, "Missing authorized user");
+	if (execpath == NULL) {
+		execpath = CONFIG_GIT_EXEC_PATH;
 	}
 
-	while (*repository == '/') {
-		repository++;
+	return git_host_pathcat(execpath, file);
+}
+
+static int
+git_host_normalize_path(char *path) {
+	enum {
+		NORMALIZE_STATE_TRAILING_SLASH,
+		NORMALIZE_STATE_NAME_DOT_DOT,
+		NORMALIZE_STATE_NAME_DOT,
+		NORMALIZE_STATE_NAME,
+	} state = NORMALIZE_STATE_TRAILING_SLASH;
+	unsigned int dst = 0, src = 0;
+
+	while (path[src] != '\0') {
+		switch (state) {
+		case NORMALIZE_STATE_TRAILING_SLASH:
+			switch (path[src]) {
+			case '/':
+				break;
+			case '.':
+				state = NORMALIZE_STATE_NAME_DOT;
+				break;
+			default:
+				path[dst++] = path[src];
+				state = NORMALIZE_STATE_NAME;
+				break;
+			}
+			break;
+		case NORMALIZE_STATE_NAME_DOT_DOT:
+			if (path[src] == '/') {
+				if (dst != 0) {
+					dst -= 2;
+					while (dst != 0 && path[dst - 1] != '/') {
+						dst--;
+					}
+				}
+				state = NORMALIZE_STATE_TRAILING_SLASH;
+			} else {
+				path[dst++] = '.';
+				path[dst++] = '.';
+				path[dst++] = path[src];
+				state = NORMALIZE_STATE_NAME;
+			}
+			break;
+		case NORMALIZE_STATE_NAME_DOT:
+			switch (path[src]) {
+			case '/':
+				state = NORMALIZE_STATE_TRAILING_SLASH;
+				break;
+			case '.':
+				state = NORMALIZE_STATE_NAME_DOT_DOT;
+				break;
+			default:
+				path[dst++] = '.';
+				path[dst++] = path[src];
+				state = NORMALIZE_STATE_NAME;
+				break;
+			}
+			break;
+		case NORMALIZE_STATE_NAME:
+			path[dst++] = path[src];
+			if (path[src] == '/') {
+				state = NORMALIZE_STATE_TRAILING_SLASH;
+			}
+			break;
+		}
+		src++;
 	}
 
-	if (git_host_check_path(repository) != 0) {
-		errx(EXIT_FAILURE, "Invalid repository '%s': a path component starts with '.'", repository);
+	switch (state) {
+	case NORMALIZE_STATE_TRAILING_SLASH:
+		/* fallthrough */
+	case NORMALIZE_STATE_NAME_DOT:
+		if (dst != 0) {
+			dst--;
+		}
+		break;
+	case NORMALIZE_STATE_NAME_DOT_DOT:
+		if (dst != 0) {
+			dst -= 2;
+			while (dst != 0 && path[dst] != '/') {
+				dst--;
+			}
+		}
+		break;
+	case NORMALIZE_STATE_NAME:
+		break;
 	}
 
-	const size_t repositorylen = strlen(repository), userlen = strlen(user);
-	if (repositorylen < userlen + 2 || strncmp(repository, user, userlen) != 0 || repository[userlen] != '/') {
-		errx(EXIT_FAILURE, "Invalid repository '%s': path's first component isn't '%s'", repository, user);
+	path[dst] = '\0';
+
+	if (*path == '\0') {
+		/* Empty, or resolved empty, is always invalid */
+		return -1;
 	}
 
-	static const char repositories[] = "repositories/";
-	char * const host = malloc(sizeof (repositories) + repositorylen);
-	if (host == NULL) {
-		err(EXIT_FAILURE, "malloc");
+	return 0;
+}
+
+static int
+git_host_check_repository_path(const char *path, enum git_host_mode mode) {
+	/* Only paths of the form <toplevel>/<git dir> are allowed to reference repositories */
+	const char * const s = strchr(path, '/');
+
+	if (s == NULL || s[1] == '.' || strchr(s + 1, '/') != NULL) {
+		return -1;
 	}
 
-	memcpy(host, repositories, sizeof (repositories) - 1);
-	memcpy(host + sizeof (repositories) - 1, repository, repositorylen + 1);
+	if (mode & GIT_HOST_MODE_WR) {
+		const char * const authorized = getenv("SSH_AUTHORIZED_BY");
 
-	return host;
+		if (authorized == NULL) {
+			errx(EXIT_FAILURE, "Missing authorization");
+		}
+
+		const size_t authorizedlen = strlen(authorized);
+		if (authorizedlen != s - path
+			|| strncmp(path, authorized, authorizedlen) != 0) {
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static char *
+git_host_repository(const char *raw, enum git_host_mode mode) {
+	char path[strlen(raw) + 1];
+
+	memcpy(path, raw, sizeof (path));
+	if (git_host_normalize_path(path) != 0 || git_host_check_repository_path(path, mode) != 0) {
+		errx(EXIT_FAILURE, "Invalid repository path '%s' '%s'", path, raw);
+	}
+
+	return git_host_pathcat(CONFIG_GIT_HOST_REPOSITORIES, path);
+}
+
+static int
+git_host_dir_filter(const struct dirent *entry) {
+	return *entry->d_name != '.';
 }
 
 static void
-git_host_exec_transfer(int argc, char **argv) {
+git_host_dir(const char *directory) {
+	struct dirent **namelist;
+	int count;
+
+	count = scandir(directory, &namelist, git_host_dir_filter, alphasort);
+	if (count < 0) {
+		err(EXIT_FAILURE, "scandir %s", directory);
+	}
+
+	printf("%s:\n", directory);
+	for (int i = 0; i < count; i++) {
+		struct dirent * const entry = namelist[i];
+
+		printf("\t%s/%s\n", directory, entry->d_name);
+
+		free(entry);
+	}
+
+	free(namelist);
+}
+
+static void noreturn
+git_host_exec_dir(int argc, char **argv) {
+
+	if (chdir(CONFIG_GIT_HOST_REPOSITORIES) != 0) {
+		err(EXIT_FAILURE, "chdir "CONFIG_GIT_HOST_REPOSITORIES);
+	}
+
+	if (argc == 1) {
+		DIR * const dirp = opendir(".");
+		struct dirent *entry;
+
+		while (errno = 0, entry = readdir(dirp)) {
+			if (*entry->d_name != '.') {
+				git_host_dir(entry->d_name);
+			}
+		}
+
+		closedir(dirp);
+	} else {
+		for (int i = 1; i < argc; i++) {
+			if (*argv[i] != '.') {
+				git_host_dir(argv[i]);
+			}
+		}
+	}
+
+	exit(EXIT_SUCCESS);
+}
+
+static void noreturn
+git_host_exec_init(int argc, char **argv) {
+	static const char argv0[] = "git-init";
 
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s <repository>\n", *argv);
 		exit(EXIT_FAILURE);
 	}
 
-	execlp(*argv, *argv, git_host_repository(argv[1]), NULL);
+	execl(git_host_execpath(argv0), argv0, "--quiet", "--bare", "--", git_host_repository(argv[1], GIT_HOST_MODE_WR), NULL);
+	err(-1, "exec %s", argv0);
 }
 
-static void
-git_host_exec_new(int argc, char **argv) {
+static void noreturn
+git_host_exec_rx_tx(int argc, char **argv, enum git_host_mode mode) {
 
 	if (argc != 2) {
-		fputs("usage: new <repository>\n", stderr);
+		fprintf(stderr, "usage: %s <repository>\n", *argv);
 		exit(EXIT_FAILURE);
 	}
 
-	execlp("git", "git", "init", "-q", "--bare", "--", git_host_repository(argv[1]), NULL);
+	execl(git_host_execpath(argv[0]), argv[0], git_host_repository(argv[1], mode), NULL);
+	err(-1, "exec %s", *argv);
+}
+
+static void noreturn
+git_host_exec_git_receive_pack(int argc, char **argv) {
+	git_host_exec_rx_tx(argc, argv, GIT_HOST_MODE_WR);
+}
+
+static void noreturn
+git_host_exec_git_upload_X(int argc, char **argv) {
+	git_host_exec_rx_tx(argc, argv, GIT_HOST_MODE_RO);
 }
 
 static void noreturn
 git_host_exec(int argc, char **argv) {
-	static struct {
-		const char *name;
-		void (*exec)(int, char **);
+	static const struct {
+		const char * const name;
+		void (* const exec)(int, char **);
 	} commands[] = {
-		{ "git-receive-pack",   git_host_exec_transfer },
-		{ "git-upload-pack",    git_host_exec_transfer },
-		{ "git-upload-archive", git_host_exec_transfer },
-		{ "new",                git_host_exec_new },
+		{ "dir",                git_host_exec_dir },
+		{ "init",               git_host_exec_init },
+		{ "git-receive-pack",   git_host_exec_git_receive_pack },
+		{ "git-upload-archive", git_host_exec_git_upload_X },
+		{ "git-upload-pack",    git_host_exec_git_upload_X },
 	};
 	const unsigned int commandscount = sizeof (commands) / sizeof (*commands);
 	unsigned int i = 0;
@@ -186,11 +392,11 @@ git_host_exec(int argc, char **argv) {
 	}
 
 	if (i == commandscount) {
-		errx(127, "Invalid command '%s'", *argv);
+		errx(EXIT_FAILURE, "Invalid command '%s'", *argv);
 	}
 
 	commands[i].exec(argc, argv);
-	err(127, "exec %s", commands[i].name);
+	abort();
 }
 
 static void noreturn

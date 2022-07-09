@@ -12,6 +12,16 @@ With this default configuration, adding a new user and checking up if he/she doe
 
 Git host simplifies the process by just letting you add a system user to a dedicated group (the `git` group).
 
+## Configure, build and install
+
+Meson is used to configure, build and install binaires and documentations.
+Don't forget to setup the gitexecpath option to ensure git-host correctly finds git executables.
+```
+meson setup -D gitexecpath=/usr/lib/git-core --buildtype=release build
+meson compile -C build
+meson install -C build
+```
+
 ## Setting up the server
 
 You must create a git user and a git group first:
@@ -51,7 +61,7 @@ Then, the `git-host` is executed and receives the `SSH_AUTHORIZED_BY` environmen
 
 Imagine our server is named bob, and roger sat up its public keys from an alice host. From the alice host, and inside a repository, roger could setup a remote the following way:
 ```
-ssh git@bob new roger/repo
+ssh git@bob init roger/repo
 git remote add bob ssh://git@bob:/roger/repo
 git push -u bob master
 ```
