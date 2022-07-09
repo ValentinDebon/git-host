@@ -1,0 +1,9 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define CONFIG_GIT_EXEC_PATH "@CONFIG_GIT_EXEC_PATH@"
+#define CONFIG_GIT_HOST_REPOSITORIES "@CONFIG_GIT_HOST_REPOSITORIES@"
+
+/* CONFIG_H */
+#endif
