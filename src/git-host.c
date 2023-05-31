@@ -8,8 +8,6 @@
 #include <errno.h>
 #include <err.h>
 
-#include "config.h"
-
 struct git_host_args {
 	const char *command;
 };
@@ -278,7 +276,7 @@ git_host_repository(const char *raw, enum git_host_mode mode) {
 		errx(EXIT_FAILURE, "Invalid repository path '%s' '%s'", path, raw);
 	}
 
-	return git_host_pathcat(CONFIG_GIT_HOST_REPOSITORIES, path);
+	return git_host_pathcat(CONFIG_GIT_HOME_REPOSITORIES, path);
 }
 
 static int
@@ -311,8 +309,8 @@ git_host_dir(const char *directory) {
 static void noreturn
 git_host_exec_dir(int argc, char **argv) {
 
-	if (chdir(CONFIG_GIT_HOST_REPOSITORIES) != 0) {
-		err(EXIT_FAILURE, "chdir "CONFIG_GIT_HOST_REPOSITORIES);
+	if (chdir(CONFIG_GIT_HOME_REPOSITORIES) != 0) {
+		err(EXIT_FAILURE, "chdir "CONFIG_GIT_HOME_REPOSITORIES);
 	}
 
 	if (argc == 1) {
@@ -412,7 +410,7 @@ git_host_parse_args(int argc, char **argv) {
 	};
 	int c;
 
-	while (c = getopt(argc, argv, ":c:"), c != -1) {
+	while ((c = getopt(argc, argv, ":c:")) >= 0) {
 		switch (c) {
 		case 'c':
 			args.command = optarg;

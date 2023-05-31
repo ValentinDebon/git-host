@@ -1,1 +1,8 @@
-build/
+configure
+GNUmakefile
+
+git-host
+ssh-host-authorized-keys
+
+*.[ao]
+*.so

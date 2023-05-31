@@ -14,12 +14,12 @@ Git host simplifies the process by just letting you add a system user to a dedic
 
 ## Configure, build and install
 
-Meson is used to configure, build and install binaires and documentations.
-Don't forget to setup the gitexecpath option to ensure git-host correctly finds git executables.
+Download and extract a source release tarball.
+You may need to tweak `--with-git-exec-path` for git-host to correctly finds git executables.
 ```
-meson setup -D gitexecpath=/usr/lib/git-core --buildtype=release build
-meson compile -C build
-meson install -C build
+./configure
+make
+make install
 ```
 
 ## Setting up the server
@@ -45,7 +45,7 @@ Then, you'll need to create a `Match` rule for the `git` user, you can usually s
 PermitUserEnvironment SSH_AUTHORIZED_BY
 
 Match User git
-	AuthorizedKeysCommand /usr/local/bin/ssh-host-authorized-keys -G git -t %t -- %k
+	AuthorizedKeysCommand /usr/local/libexec/ssh-host-authorized-keys -G git -t %t -- %k
 	AuthorizedKeysCommandUser nobody
 	PasswordAuthentication no
 ```

@@ -1,2 +1,0 @@
-option('gitexecpath', type : 'string', value : '', description : 'Install prefix of the git core executables on the host machine')
-option('githostrepositories', type : 'string', value : 'repositories', description : 'Location of repositories in the git user home directory')

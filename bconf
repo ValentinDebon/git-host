@@ -1,0 +1,7 @@
+config GIT_EXEC_PATH
+	"Install prefix of the git core executables on the host machine"
+	defaults "$(libdir)/git-core"
+
+config GIT_HOME_REPOSITORIES
+	"Location of repositories in the git user home directory"
+	defaults "repositories"

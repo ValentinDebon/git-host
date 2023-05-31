@@ -217,7 +217,7 @@ ssh_host_authorized_keys_parse_args(int argc, char **argv) {
 	};
 	int c;
 
-	while (c = getopt(argc, argv, ":G:t:"), c != -1) {
+	while ((c = getopt(argc, argv, ":G:t:")) >= 0) {
 		switch (c) {
 		case 'G':
 			args.group = optarg;
